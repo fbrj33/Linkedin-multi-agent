@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html>
+<body style="font-family:Arial,sans-serif;max-width:700px;margin:auto;">
+
+    <div style="background:#1F4E79;padding:20px;border-radius:8px 8px 0 0;">
+        <h1 style="color:white;margin:0;"> Plan LinkedIn — {{month}}</h1>
+        <p style="color:#ccc;margin:5px 0 0;">Wimbee Content Automation</p>
+    </div>
+
+    <div style="padding:20px;background:#f9f9f9;">
+        <p>Bonjour,</p>
+        <p>Le plan éditorial LinkedIn pour <strong>{{month}}</strong> est prêt.</p>
+        <p>Répondez à cet email avec :</p>
+        <ul>
+            <li><strong>OUI</strong> — pour approuver le plan</li>
+            <li><strong>NON</strong> — pour rejeter le plan</li>
+        </ul>
+        <p style="color:#e74c3c;">
+            <strong> Sans réponse avant le {{deadline}}, le plan sera auto-approuvé.</strong>
+        </p>
+    </div>
+
+    <table style="width:100%;border-collapse:collapse;">
+        <thead>
+            <tr style="background:#1F4E79;color:white;">
+                <th style="padding:10px;text-align:left;">Date & Heure</th>
+                <th style="padding:10px;text-align:left;">Thème</th>
+                <th style="padding:10px;text-align:left;">Format</th>
+                <th style="padding:10px;text-align:left;">Brief</th>
+            </tr>
+        </thead>
+        <tbody>
+            {{posts_rows}}
+        </tbody>
+    </table>
+
+    <div style="padding:20px;background:#f9f9f9;margin-top:20px;border-radius:0 0 8px 8px;font-size:12px;color:#999;text-align:center;">
+        Wimbee LinkedIn Automation — Répondez OUI ou NON à cet email.
+    </div>
+
+</body>
+</html>

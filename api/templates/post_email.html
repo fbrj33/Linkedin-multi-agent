@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html>
+<body style="font-family:Arial,sans-serif;max-width:700px;margin:auto;">
+
+    <div style="background:#1F4E79;padding:20px;border-radius:8px 8px 0 0;">
+        <h1 style="color:white;margin:0;"> Post #{{post_id}} — Approbation requise</h1>
+        <p style="color:#ccc;margin:5px 0 0;">Publication prévue le {{scheduled_date}} à {{scheduled_time}}</p>
+    </div>
+
+    <div style="padding:20px;background:#f9f9f9;">
+        <p>Bonjour,</p>
+        <p>Le post prévu pour le <strong>{{scheduled_date}} à {{scheduled_time}}</strong> est prêt.</p>
+        <p>Répondez à cet email avec :</p>
+        <ul>
+            <li><strong>OUI</strong> — pour approuver et planifier la publication</li>
+            <li><strong>NON</strong> — pour annuler ce post</li>
+        </ul>
+        <p style="color:#e74c3c;">
+            <strong> Sans réponse avant le {{deadline}}, le post sera automatiquement annulé.</strong>
+        </p>
+    </div>
+
+    <div style="padding:20px;background:white;border-left:4px solid #1F4E79;margin:20px;border-radius:4px;">
+        <h3 style="color:#1F4E79;">Contenu du post :</h3>
+        <p style="white-space:pre-line;line-height:1.8;">{{content}}</p>
+        <p style="color:#7f8c8d;font-style:italic;margin-top:15px;">{{hashtags}}</p>
+    </div>
+
+    <div style="padding:15px;background:#f9f9f9;border-radius:0 0 8px 8px;font-size:12px;color:#999;text-align:center;">
+        Wimbee LinkedIn Automation — Répondez OUI ou NON à cet email.
+    </div>
+
+</body>
+</html>
