@@ -322,9 +322,4 @@ MIT License — see LICENSE file for details.
 
 ---
 
-## About Wimbee
 
-Wimbee is a Tunisian consulting firm expert in Data, Digital, and Artificial Intelligence.
-*"Une équipe au cœur de votre stratégie Data & Digital."*
-
-Expertises : Stratégie Data · Transformation Data Driven · Transformation Digitale · Customer Intelligence · Risk & Conformité · Big Data · GDPR · Intelligence Artificielle · IA Générative
