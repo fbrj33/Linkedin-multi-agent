@@ -1,4 +1,4 @@
-from config import LLM
+from llm import get_llm
 from database.models import SessionLocal, Post
 import datetime
 import json
@@ -7,8 +7,11 @@ import re
 
 
 
-def chat(prompt: str, temperature: float = 0.7):
-    return LLM.chat(prompt, temperature=temperature)
+def chat(prompt: str, temperature: float = 0.7) -> str:
+    response = get_llm(role="content").complete(prompt, temperature=temperature)
+    if not response.ok:
+        raise RuntimeError(response.error)
+    return response.text
 
 WIMBEE_CONTEXT = """
 Tu es un expert en Data, Digital et Intelligence Artificielle qui rédige du contenu LinkedIn

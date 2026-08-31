@@ -1,58 +1,83 @@
 import argparse
-import json
+import logging
+import sys
+
+# Windows consoles default stdout/stderr to the system codepage (cp1252),
+# which can't represent an emoji or many accented characters — and content
+# generation is explicitly allowed up to 3 emojis per post, plus an admin's
+# rejection reason could contain anything. Without this, a perfectly normal
+# post or reply crashes this CLI with a raw UnicodeEncodeError the moment a
+# log line tries to print it.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 from database.models import init_db
-from agents.planner_agent import run_planner, save_plan_to_db
-from api.inbox_checker import process_plan_replies
 
 
 def plan_command(args) -> int:
     init_db()
 
-    analytics_report = None
-    if args.analytics:
-        with open(args.analytics, "r", encoding="utf-8") as f:
-            analytics_report = json.load(f)
+    from orchestrator.runner import start_plan_thread
 
-    plan = run_planner(args.month, analytics_report)
-    if not plan:
-        print("Planner returned no result. Check your LLM response and prompt formatting.")
-        return 1
-
-    save_plan_to_db(plan, send_email=args.email)
-    print(f"Plan for {args.month} saved successfully.")
+    start_plan_thread(args.month)
+    print(f"Plan thread 'plan-{args.month}' finished this run (see the [plan-{args.month}] log lines above for what it actually did).")
     return 0
 
 
 def check_replies_command(args) -> int:
     init_db()
     print("Checking inbox for Wimbee reply emails...")
-    result = process_plan_replies(generate_posts=not args.no_generate)
-    if result is None:
-        return 0
 
-    if isinstance(result, dict):
-        print(f"Processed {result.get('processed', 0)} replies.")
-        if result.get('plan_month'):
-            print(f"Pending plan month: {result['plan_month']}")
-            print(f"Updated status: {result['new_status']}")
-        if result.get('generate_posts') is False:
-            print("Post generation is disabled for now.")
+    from orchestrator.inbox import check_and_resume
+
+    resolved = check_and_resume()
+    print(f"Resolved {resolved} decision(s).")
+    return 0
+
+
+def run_command(args) -> int:
+    """One command, one terminal, continuous live output: start a plan, then
+    hand off directly into the scheduler's own blocking loop in this same
+    process — no separate step, nothing running elsewhere in the background.
+    Ctrl+C stops it; nothing is lost, everything resumes from checkpoint."""
+    init_db()
+
+    from orchestrator.runner import start_plan_thread
+    from scheduling.scheduler import main as run_scheduler_forever
+
+    start_plan_thread(args.month)
+    print(
+        f"\nPlan thread 'plan-{args.month}' created — handing off to the scheduler now. "
+        "Reply to approval emails as they arrive; this process polls for them and "
+        "prints every step live. Ctrl+C to stop.\n"
+    )
+    run_scheduler_forever()
     return 0
 
 
 def main() -> int:
+    # Every orchestrator node logs as it runs (see orchestrator/runner.py's
+    # stream-based execution) — without this, those log.info() calls are
+    # silently swallowed and this CLI looks like it does nothing until the
+    # final print.
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+
     parser = argparse.ArgumentParser(description="Wimbee LinkedIn planner CLI")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    plan_parser = subparsers.add_parser("plan", help="Generate and save a monthly LinkedIn plan")
+    plan_parser = subparsers.add_parser("plan", help="Start a monthly LinkedIn plan thread (generates + emails for approval)")
     plan_parser.add_argument("month", help="Month to plan in YYYY-MM format")
-    plan_parser.add_argument("--analytics", help="Path to a JSON analytics report file")
-    plan_parser.add_argument("--email", action="store_true", help="Also send the approval email after saving")
     plan_parser.set_defaults(func=plan_command)
 
-    reply_parser = subparsers.add_parser("check-replies", help="Check email replies for pending plans")
-    reply_parser.add_argument("--no-generate", action="store_true", help="Do not generate posts when processing replies")
+    reply_parser = subparsers.add_parser("check-replies", help="Check email replies and resume whichever graph thread they belong to")
     reply_parser.set_defaults(func=check_replies_command)
+
+    run_parser = subparsers.add_parser("run", help="Start a plan AND run the scheduler continuously in this terminal — one command, live output, until Ctrl+C")
+    run_parser.add_argument("month", help="Month to plan in YYYY-MM format")
+    run_parser.set_defaults(func=run_command)
 
     args = parser.parse_args()
     return args.func(args)

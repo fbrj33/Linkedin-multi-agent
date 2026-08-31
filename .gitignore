@@ -2,7 +2,22 @@ __pycache__/
 *.pyc
 .venv/
 venv/
+.venv/
 .env
 .vscode/
 .idea/
 .pytest_cache/
+
+# Publishing (Phase 5) — a live LinkedIn session and API secrets. Committing
+# .li_profile/ is equivalent to committing a password.
+.li_profile/
+debug_screenshots/
+linkedin_token.json
+
+# LangGraph checkpointer (Phase 6 rewrite) — full per-thread state history,
+# including every generated post draft and LLM prompt/response along the
+# way. Bulkier and more sensitive than wimbee.db's structured summary data,
+# so unlike wimbee.db this isn't tracked.
+wimbee_checkpoints.db
+wimbee_checkpoints.db-wal
+wimbee_checkpoints.db-shm

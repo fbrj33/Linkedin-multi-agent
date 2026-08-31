@@ -3,7 +3,8 @@ import json
 import re
 import time
 import datetime
-from config import LLM
+from llm import get_llm
+from llm.base import extract_json, sanitize_nullish
 from config.content_config import (
     RSS_FEEDS,
     BEST_DAYS,
@@ -15,12 +16,14 @@ from config.content_config import (
 from config.tunisian_calendar import get_month_special_days
 from config.international_it_dates import get_month_international_it_days
 import uuid
-from api.email_service import send_plan_approval_email
 from database.models import MonthlyPlan, SessionLocal
 
 
-def chat(prompt: str, temperature: float = 0.3):
-    return LLM.chat(prompt, temperature=temperature)
+def chat(prompt: str, temperature: float = 0.3) -> str:
+    response = get_llm(role="planning").complete(prompt, temperature=temperature)
+    if not response.ok:
+        raise RuntimeError(response.error)
+    return response.text
 
 
 def build_fallback_plan(month: str, special_days: list | None = None, trends: list | None = None, count: int = 6) -> dict:
@@ -103,25 +106,28 @@ def get_posting_dates(year: int, month: int, special_dates: list, count: int) ->
 
     taken_dates = set(special_dates)
 
-    selected = []
-    last_selected = None
-    time_index = 0
-
-    for day in all_days:
-        if len(selected) >= count:
-            break
-        if day.isoformat() in taken_dates:
-            continue
-        if day.weekday() in [4, 5, 6]:
-            continue
-        if last_selected and (day - last_selected).days < MIN_DAYS_BETWEEN_POSTS:
-            continue
-        if day.weekday() in BEST_DAYS:
-            time_slot = TIME_SLOTS[time_index % len(TIME_SLOTS)]
-            selected.append((day.isoformat(), time_slot))
+    def select(allowed_weekdays: set[int]) -> list:
+        selected = []
+        last_selected = None
+        time_index = 0
+        for day in all_days:
+            if len(selected) >= count:
+                break
+            if day.isoformat() in taken_dates or day.weekday() not in allowed_weekdays:
+                continue
+            if last_selected and (day - last_selected).days < MIN_DAYS_BETWEEN_POSTS:
+                continue
+            selected.append((day.isoformat(), TIME_SLOTS[time_index % len(TIME_SLOTS)]))
             last_selected = day
             time_index += 1
-    return selected
+        return selected
+
+    # Prefer the empirically best days, but a short month or special dates
+    # can make six posts mathematically impossible under that restriction.
+    # In that case recompute over all weekdays (never weekends) rather than
+    # silently returning an incomplete monthly plan.
+    preferred = select(set(BEST_DAYS))
+    return preferred if len(preferred) >= count else select({0, 1, 2, 3, 4})
 
 
 def run_planner(month: str, analytics_report: dict = None) -> dict:
@@ -233,40 +239,51 @@ Réponds UNIQUEMENT en JSON valide sans texte avant ou après :
         print("Error details:", exc)
         return plan_template
 
-    decoder = json.JSONDecoder()
-    start = raw.find("{")
-    if start == -1:
+    # extract_json + sanitize_nullish (Phase 1) instead of a bare
+    # json.JSONDecoder().raw_decode() — the old version couldn't recover a
+    # fenced ```json response and, more importantly, never sanitized the
+    # result, so a model writing the literal string "null" for special_day
+    # (see the prompt above: "nom du jour ou null") sailed straight through
+    # as a truthy value. chat() stays the seam here (rather than switching to
+    # get_llm().complete_json() directly) so this still shares one LLM
+    # call path with the rest of the module.
+    result = extract_json(raw)
+    if result is None:
         print(" No JSON found in response")
         return build_fallback_plan(month)
 
-    try:
-        result, _ = decoder.raw_decode(raw[start:])
-        if isinstance(result, dict) and isinstance(result.get("posts"), list):
-            regular_posts = [post for post in result["posts"] if not post.get("special_day")]
-            special_posts = [post for post in result["posts"] if post.get("special_day")]
-            if len(regular_posts) < 6 or len(special_posts) < len(spec_days):
-                merged_posts = []
-                for template_post in plan_template["posts"]:
-                    matching_post = next(
-                        (
-                            post
-                            for post in result["posts"]
-                            if post.get("scheduled_date") == template_post.get("scheduled_date")
-                            and post.get("special_day") == template_post.get("special_day")
-                        ),
-                        None,
-                    )
-                    merged_posts.append(matching_post or template_post)
-                result["posts"] = merged_posts
-            return result
-        return plan_template
-    except json.JSONDecodeError as e:
-        print(f" JSON parse error: {e}")
-        print("RAW RESPONSE:", raw[:500])
-        return plan_template
+    result = sanitize_nullish(result)
+
+    if isinstance(result, dict) and isinstance(result.get("posts"), list):
+        regular_posts = [post for post in result["posts"] if not post.get("special_day")]
+        special_posts = [post for post in result["posts"] if post.get("special_day")]
+        if len(regular_posts) < 6 or len(special_posts) < len(spec_days):
+            merged_posts = []
+            for template_post in plan_template["posts"]:
+                matching_post = next(
+                    (
+                        post
+                        for post in result["posts"]
+                        if post.get("scheduled_date") == template_post.get("scheduled_date")
+                        and post.get("special_day") == template_post.get("special_day")
+                    ),
+                    None,
+                )
+                merged_posts.append(matching_post or template_post)
+            result["posts"] = merged_posts
+        return result
+    return plan_template
 
 
-def save_plan_to_db(plan: dict, send_email: bool = False) -> MonthlyPlan:
+def save_plan_to_db(plan: dict) -> MonthlyPlan:
+    """Persists the plan only — sending the approval email is
+    orchestrator/nodes_plan.py::notify_plan_approval's job, kept as its own
+    graph node so a resume of plan_approval can never re-trigger it (see
+    that module's interrupt-replay note). This function must never send
+    email itself: doing so here would create a MonthlyPlan row with no
+    corresponding graph_thread, and any reply to that email would have no
+    thread to resume — permanently unresolvable.
+    """
     db = SessionLocal()
     now = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
     deadline = now + datetime.timedelta(hours=72)
@@ -284,17 +301,5 @@ def save_plan_to_db(plan: dict, send_email: bool = False) -> MonthlyPlan:
     db.refresh(db_plan)
     db.close()
 
-    if send_email:
-        send_plan_approval_email(
-            plan=plan,
-            deadline=deadline_label,
-        )
-        print(f"Plan saved (id={db_plan.id}) and email sent. Deadline: {deadline_label}")
-    else:
-        print(f"Plan saved (id={db_plan.id}) to wimbee.db. Deadline: {deadline_label}")
-
+    print(f"Plan saved (id={db_plan.id}) to wimbee.db. Deadline: {deadline_label}")
     return db_plan
-
-
-def save_and_notify_plan(plan: dict) -> MonthlyPlan:
-    return save_plan_to_db(plan, send_email=True)

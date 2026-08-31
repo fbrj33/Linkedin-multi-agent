@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Mock LinkedIn Composer</title>
+</head>
+<body>
+<!--
+  Mirrors the real LinkedIn composer's DOM contract that
+  publishing/browser_publisher.py depends on:
+    button.share-box-feed-entry__trigger   (opens the composer)
+    .share-box__actor-name                 (identity chip — the guard reads this)
+    div.ql-editor[contenteditable=true]    (post body)
+    button.share-actions__primary-action   (submits the post)
+
+  Query params drive every failure mode this test fixture exists for:
+    ?actor=X        actor chip shows X instead of the real org name
+    ?fail=nocomposer   the trigger button never renders
+    ?fail=noeditor     composer opens but no editor renders
+    ?fail=stuck        Post button click does nothing (composer never closes)
+    ?fail=session      redirects to login.html (session death) — handled as
+                       a real HTTP 302 by tests/mock_linkedin_server.py, not
+                       by this page, since a client-side JS redirect would
+                       race Playwright's navigation wait non-deterministically
+    ?slow=N            adds an N-ms delay before composer-open and before
+                       Post-click takes effect, to prove real (if slow) UI
+                       latency doesn't get mistaken for one of the failures
+                       above
+-->
+<div id="feed"></div>
+<div id="composer" style="display:none;">
+  <span class="share-box__actor-name"></span>
+  <button class="share-actions__primary-action">Post</button>
+</div>
+
+<script>
+(function () {
+  var params = new URLSearchParams(window.location.search);
+  var actor = params.get('actor') || 'Wimbee — Company Page';
+  var fail = params.get('fail') || '';
+  var slow = parseInt(params.get('slow') || '0', 10) || 0;
+
+  var feed = document.getElementById('feed');
+  var composer = document.getElementById('composer');
+  var postButton = composer.querySelector('.share-actions__primary-action');
+
+  if (fail !== 'nocomposer') {
+    var trigger = document.createElement('button');
+    trigger.className = 'share-box-feed-entry__trigger';
+    trigger.textContent = 'Start a post';
+    trigger.addEventListener('click', function () {
+      window.setTimeout(openComposer, slow);
+    });
+    feed.appendChild(trigger);
+  }
+
+  function openComposer() {
+    composer.querySelector('.share-box__actor-name').textContent = actor;
+
+    if (fail !== 'noeditor') {
+      var editor = document.createElement('div');
+      editor.className = 'ql-editor';
+      editor.setAttribute('contenteditable', 'true');
+      editor.setAttribute('role', 'textbox');
+      composer.insertBefore(editor, postButton);
+    }
+
+    composer.style.display = 'block';
+  }
+
+  postButton.addEventListener('click', function () {
+    if (fail === 'stuck') {
+      return; // deliberately inert — composer must stay open
+    }
+    window.setTimeout(function () {
+      composer.remove(); // simulates the composer closing after a real post
+    }, slow);
+  });
+})();
+</script>
+</body>
+</html>
