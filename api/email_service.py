@@ -40,14 +40,8 @@ def render_template(template: str, variables: dict) -> str:
     return template
 
 
-def send_email(subject: str, html_body: str, to_addr: str | None = None) -> bool:
-    """Base function — sends any HTML email via Gmail SMTP.
-
-    to_addr defaults to ADMIN_EMAIL — orchestrator/nodes_plan.py's
-    notify_plan_approval relies on that default; nodes_post.py's
-    notify_post_approval and orchestrator/inbox.py pass it explicitly so the
-    recipient isn't implicitly tied to this module's env var there.
-    """
+def send_email(subject: str, html_body: str, to_addr: str | None = None, message_id: str | None = None) -> bool:
+    
     gmail_user = _gmail_user()
     gmail_password = _gmail_password()
     if not gmail_user or not gmail_password:
@@ -61,6 +55,16 @@ def send_email(subject: str, html_body: str, to_addr: str | None = None) -> bool
         msg["Subject"] = subject
         msg["From"]    = gmail_user
         msg["To"]      = recipient
+        if message_id:
+            msg["Message-ID"] = message_id
+        
+        
+        if in_reply_to:
+            msg["In-Reply-To"] = in_reply_to
+        if references:
+            msg["References"] = references
+
+        
 
         msg.attach(MIMEText(html_body, "html"))
 

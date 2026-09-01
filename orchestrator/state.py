@@ -45,3 +45,5 @@ class PostState(TypedDict, total=False):
     publish_error: Optional[str]
     publish_attempt: int
     needs_human: bool
+    image_path: Optional[str] 
+    email_message_id: Optional[str]

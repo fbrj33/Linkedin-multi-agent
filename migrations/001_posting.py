@@ -45,6 +45,7 @@ _NEW_COLUMNS: dict[str, dict[str, str]] = {
         "external_id": "VARCHAR(255)",
         "brief": "TEXT",
         "score_reason": "TEXT",
+        "email_message_id": "VARCHAR(255)",
     },
     "approval_requests": {
         "reminder_sent_at": "DATETIME",

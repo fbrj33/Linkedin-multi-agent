@@ -33,6 +33,7 @@ class Post(Base):
     published_at      = Column(DateTime())                  # set by the posting agent on success
     publish_error     = Column(Text())                      # set by the posting agent on failure
     image_path        = Column(String(300))                 # optional image attached to a post
+    email_message_id  = Column(String(255))                 # original approval email, for revision threading
     external_id       = Column(String(255))                 # LinkedIn URN, set after a successful publish
 
 
@@ -143,6 +144,7 @@ def init_db():
                 "published_at":   "DATETIME",
                 "publish_error":  "TEXT",
                 "image_path":     "VARCHAR(300)",
+                "email_message_id": "VARCHAR(255)",
             }
             for col_name, col_type in additive_columns.items():
                 if col_name not in cols:

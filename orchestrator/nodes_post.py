@@ -13,12 +13,13 @@ import datetime
 import logging
 import os
 import time
+import uuid
 from zoneinfo import ZoneInfo
 
 from langgraph.types import interrupt
 
 from agents.content_agent import run_content
-from api.email_service import load_template, render_template, send_email
+from api.email_service import EmailDelivery, load_template, render_template, send_email
 from database.models import Post, SessionLocal
 from llm import get_llm
 from orchestrator.state import PostState
@@ -73,6 +74,20 @@ def _hashtags_str(hashtags) -> str | None:
     if isinstance(hashtags, list):
         return " ".join(hashtags)
     return hashtags
+
+
+def _generate_image_if_requested(post_id: int, post_format: str | None) -> None:
+    """Generate a visual as part of the existing content path.
+
+    The local import avoids a module-level dependency cycle: the supplied
+    image generator is free to import database models itself.
+    """
+    if (post_format or "").strip().lower() not in {"image", "photo"}:
+        return
+
+    from agents.image_generator import generate_image_for_post
+
+    generate_image_for_post(post_id)
 
 
 def load(state: PostState) -> dict:
@@ -132,6 +147,7 @@ def generate_content(state: PostState) -> dict:
     content = result.get("content")
     hashtags = _hashtags_str(result.get("hashtags"))
     _save_content(state["post_id"], content, hashtags)
+    _generate_image_if_requested(state["post_id"], state.get("format"))
     return {
         "content": content,
         "hashtags": hashtags,
@@ -221,6 +237,7 @@ def refine_content(state: PostState) -> dict:
     content = result.get("content")
     hashtags = _hashtags_str(result.get("hashtags"))
     _save_content(state["post_id"], content, hashtags)
+    _generate_image_if_requested(state["post_id"], state.get("format"))
     return {
         "content": content,
         "hashtags": hashtags,
@@ -253,7 +270,11 @@ def notify_post_approval(state: PostState) -> dict:
         db.close()
 
     admin_email = os.getenv("ADMIN_EMAIL", os.getenv("GMAIL_USER", "")).strip()
-    sent = send_email(subject, html, admin_email)
+    
+    
+    message_id = f"<wimbee-post-{state['post_id']}-{uuid.uuid4()}@wimbee.local>"
+    
+    sent = send_email(subject, html, admin_email, message_id=message_id)
     if not sent:
         db = SessionLocal()
         try:
@@ -265,10 +286,12 @@ def notify_post_approval(state: PostState) -> dict:
             db.close()
         raise RuntimeError("Post approval email was not sent; refusing to wait for an unreachable approval")
 
+    
     db = SessionLocal()
     try:
         post = db.query(Post).filter(Post.id == state["post_id"]).first()
         if post is not None:
+            post.email_message_id = message_id  
             post.status = "pending_approval"
             db.commit()
     finally:
@@ -307,6 +330,76 @@ def post_approval(state: PostState) -> dict:
         db.close()
 
     return update
+
+
+def send_rejection_reply(state: PostState) -> dict:
+    
+    db = SessionLocal()
+    try:
+        post = db.query(Post).filter(Post.id == state["post_id"]).first()
+        if post is None:
+            return {}
+        
+        
+        original_message_id = post.email_message_id
+        if not original_message_id:
+            log.warning(f"Post {post.id}: no original Message-ID stored; cannot thread reply")
+            return {}
+        
+        
+        deadline_label = post.approval_deadline.strftime("%d/%m/%Y à %H:%M") if post.approval_deadline else "N/A"
+        template = load_template("post_approval_email.html")
+        html = render_template(template, {
+            "post_id": post.id,
+            "scheduled_date": post.scheduled_date,
+            "scheduled_time": post.scheduled_time or "",
+            "deadline": deadline_label,
+            "content": post.content or "",
+            "hashtags": post.hashtags or "",
+            "approval_token": post.approval_token,
+            "rejection_reason": state.get("rejection_reason", ""),
+        })
+        
+        # Original subject (without "Re: " prefix for reconstruction)
+        original_subject = f"[WIMBEE] Post #{post.id} du {post.scheduled_date} à {post.scheduled_time}"
+        reply_subject = f"Re: {original_subject}"
+        
+    finally:
+        db.close()
+
+    admin_email = os.getenv("ADMIN_EMAIL", os.getenv("GMAIL_USER", "")).strip()
+    
+    # Send with threading headers
+    sent = send_email(
+        subject=reply_subject,
+        html_body=html,
+        to_addr=admin_email,
+        in_reply_to=original_message_id,
+        references=original_message_id
+    )
+    
+    if not sent:
+        db = SessionLocal()
+        try:
+            post = db.query(Post).filter(Post.id == state["post_id"]).first()
+            if post is not None:
+                post.status = "reply_send_failed"
+                db.commit()
+        finally:
+            db.close()
+        raise RuntimeError(f"Failed to send rejection reply for post {state['post_id']}")
+
+    db = SessionLocal()
+    try:
+        post = db.query(Post).filter(Post.id == state["post_id"]).first()
+        if post is not None:
+            post.status = "pending_approval"  # Back to waiting for approval
+            db.commit()
+    finally:
+        db.close()
+    
+    log.info(f"✓ Regenerated post {state['post_id']} sent as reply in thread")
+    return {}
 
 
 def wait_for_slot(state: PostState) -> dict:
