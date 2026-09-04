@@ -1,18 +1,6 @@
 from __future__ import annotations
 
-"""
-Builds the per-post graph:
 
-    load -> generate_content -> score_content <-> refine_content (max 2 loops)
-         -> notify_post_approval -> post_approval [interrupt]
-              approved -> wait_for_slot [interrupt] -> publish -> verify_publish
-                          (retry <=3, backoff) -> finalize
-              rejected -> generate_content (retry <=2) | finalize
-              expired  -> finalize
-
-See orchestrator/plan_graph.py's module docstring for the interrupt-replay
-rationale behind splitting notify_post_approval from post_approval.
-"""
 
 from langgraph.graph import END, START, StateGraph
 
@@ -37,7 +25,7 @@ def _route_after_approval(state: PostState) -> str:
     if decision == "approved":
         return "wait_for_slot"
     if decision == "rejected" and state.get("retry_count", 0) <= nodes.rejection_retry_limit():
-        return "generate_content"
+        return "send_rejection_reply"  # NEW: thread the reply first
     return "finalize"  # expired, or rejected past the retry limit
 
 
@@ -59,6 +47,7 @@ def build_post_graph():
     builder.add_node("refine_content", nodes.refine_content)
     builder.add_node("notify_post_approval", nodes.notify_post_approval)
     builder.add_node("post_approval", nodes.post_approval)
+    builder.add_node("send_rejection_reply", nodes.send_rejection_reply)  # NEW
     builder.add_node("wait_for_slot", nodes.wait_for_slot)
     builder.add_node("publish", nodes.publish)
     builder.add_node("verify_publish", nodes.verify_publish)
@@ -70,7 +59,8 @@ def build_post_graph():
     builder.add_conditional_edges("score_content", _route_after_score, ["refine_content", "notify_post_approval"])
     builder.add_edge("refine_content", "score_content")
     builder.add_edge("notify_post_approval", "post_approval")
-    builder.add_conditional_edges("post_approval", _route_after_approval, ["wait_for_slot", "generate_content", "finalize"])
+    builder.add_conditional_edges("post_approval", _route_after_approval, ["wait_for_slot", "send_rejection_reply", "finalize"])  # UPDATED
+    builder.add_edge("send_rejection_reply", "score_content")
     builder.add_edge("wait_for_slot", "publish")
     builder.add_edge("publish", "verify_publish")
     builder.add_conditional_edges("verify_publish", _route_after_verify, ["publish", "finalize"])
@@ -90,6 +80,6 @@ def get_post_graph():
 
 
 def reset_post_graph() -> None:
-    """Test-only: drop the cached compiled graph so a changed checkpointer takes effect."""
+
     global _graph
     _graph = None

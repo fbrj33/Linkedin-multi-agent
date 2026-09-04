@@ -17,6 +17,8 @@ class Post(Base):
     scheduled_time    = Column(String(10))
     special_day       = Column(String(100))
     trend_source      = Column(String(300))
+    trend_article_title = Column(String(500))
+    trend_article_url = Column(String(1000))
     brief             = Column(Text())                       # editorial brief from the plan item, needed at content-gen time
     content           = Column(Text())
     hashtags          = Column(Text())
@@ -145,6 +147,8 @@ def init_db():
                 "publish_error":  "TEXT",
                 "image_path":     "VARCHAR(300)",
                 "email_message_id": "VARCHAR(255)",
+                "trend_article_title": "VARCHAR(500)",
+                "trend_article_url": "VARCHAR(1000)",
             }
             for col_name, col_type in additive_columns.items():
                 if col_name not in cols:

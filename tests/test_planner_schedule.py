@@ -71,3 +71,25 @@ def test_planner_recovers_fenced_json_response(monkeypatch):
     result = pa.run_planner(month)
 
     assert result["month"] == "2026-08"
+
+
+def test_planner_fallback_keeps_rss_articles_when_model_response_is_invalid(monkeypatch):
+    month = "2026-08"
+    article = {
+        "title": "Actualite IA",
+        "summary": "Un resume RSS utile.",
+        "source": "Tech Source",
+        "url": "https://example.com/article",
+    }
+
+    monkeypatch.setattr(pa, "fetch_rss_trends", lambda: [article])
+    monkeypatch.setattr(pa, "get_month_special_days", lambda y, m: [])
+    monkeypatch.setattr(pa, "get_month_international_it_days", lambda y, m: [])
+    monkeypatch.setattr(pa, "chat", lambda prompt, temperature=0.3: "not valid json")
+
+    result = pa.run_planner(month)
+
+    regular_post = next(post for post in result["posts"] if not post.get("special_day"))
+    assert regular_post["trend_article_title"] == article["title"]
+    assert regular_post["trend_article_url"] == article["url"]
+    assert regular_post["theme"] == article["title"]

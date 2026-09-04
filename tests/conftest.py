@@ -1,56 +1,44 @@
-from __future__ import annotations
-
-
-
-import os
-import tempfile
+"""
+Pytest configuration and shared fixtures for Wimbee tests.
+"""
 
 import pytest
+import os
+import sys
+from pathlib import Path
 
-_tmp_dir = tempfile.mkdtemp(prefix="wimbee-test-db-")
-os.environ.setdefault("WIMBEE_DATABASE_URL", f"sqlite:///{os.path.join(_tmp_dir, 'test.db')}")
-os.environ.setdefault("WIMBEE_CHECKPOINT_DB", os.path.join(_tmp_dir, "test_checkpoints.db"))
+# Add project root to path
+PROJECT_ROOT = Path(__file__).parent.parent
+sys.path.insert(0, str(PROJECT_ROOT))
 
-from database.models import ApprovalRequest, GraphThread, MonthlyPlan, Post, SessionLocal, init_db  # noqa: E402
+# Set test database URL to avoid corrupting production DB
+os.environ["WIMBEE_DATABASE_URL"] = "sqlite:///test_wimbee.db"
+os.environ["LLM_PROVIDER"] = "xai"
 
-init_db()
-
-
-def _wipe_tables() -> None:
-    db = SessionLocal()
-    try:
-        db.query(ApprovalRequest).delete()
-        db.query(GraphThread).delete()
-        db.query(Post).delete()
-        db.query(MonthlyPlan).delete()
-        db.commit()
-    finally:
-        db.close()
+from database.models import Base, engine, SessionLocal
 
 
-@pytest.fixture(autouse=True)
-def _isolated_database(monkeypatch, tmp_path):
-    """Every test starts and ends with empty tables, AND its own fresh
-    checkpoint DB. The latter matters more than it looks: SQLite reuses
-    rowids after a DELETE when a table has no AUTOINCREMENT column (which
-    Post/GraphThread don't), so post_id=1 in one test is post_id=1 again in
-    the next — and orchestrator/checkpointer.py, plan_graph.py, and
-    post_graph.py all cache their checkpointer/compiled-graph objects at
-    module level. Without resetting those too, a later test's
-    thread_id="post-1" would silently resume the previous test's leftover
-    checkpoint state instead of starting fresh.
-    """
-    _wipe_tables()
-
-    monkeypatch.setenv("WIMBEE_CHECKPOINT_DB", str(tmp_path / "checkpoints.db"))
-    from orchestrator.checkpointer import reset_checkpointer
-    from orchestrator.plan_graph import reset_plan_graph
-    from orchestrator.post_graph import reset_post_graph
-
-    reset_checkpointer()
-    reset_plan_graph()
-    reset_post_graph()
-
+@pytest.fixture(scope="function")
+def test_db():
+    """Create fresh test database for each test."""
+    Base.metadata.create_all(engine)
     yield
+    Base.metadata.drop_all(engine)
+    
+    # Clean up test DB file
+    if os.path.exists("test_wimbee.db"):
+        os.remove("test_wimbee.db")
 
-    _wipe_tables()
+
+@pytest.fixture
+def db_session(test_db):
+    """Provide a database session for tests."""
+    session = SessionLocal()
+    yield session
+    session.close()
+
+
+@pytest.fixture
+def admin_email():
+    """Provide admin email for testing."""
+    return os.getenv("ADMIN_EMAIL", "admin@wimbee.local")

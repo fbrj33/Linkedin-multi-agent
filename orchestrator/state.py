@@ -29,6 +29,8 @@ class PostState(TypedDict, total=False):
     scheduled_time: Optional[str]
     special_day: Optional[str]
     trend_source: Optional[str]
+    trend_article_title: Optional[str]
+    trend_article_url: Optional[str]
     brief: Optional[str]
     content: Optional[str]
     hashtags: Optional[str]

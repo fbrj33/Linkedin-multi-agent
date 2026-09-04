@@ -291,6 +291,36 @@ def test_gemini_blocked_response_is_not_ok(monkeypatch):
     assert "SAFETY" in response.error
 
 
+def test_content_chat_retries_gemini_503_with_exponential_backoff(monkeypatch):
+    from agents import content_agent
+    responses = [SimpleNamespace(ok=False, error="503 UNAVAILABLE"),
+                 SimpleNamespace(ok=False, error="UNAVAILABLE"),
+                 SimpleNamespace(ok=True, text="recovered")]
+    calls = []
+
+    class GeminiProvider:
+        def complete(self, prompt, temperature=0.7):
+            calls.append(prompt)
+            return responses.pop(0)
+
+    monkeypatch.setattr(content_agent, "get_llm", lambda role=None: GeminiProvider())
+    monkeypatch.setattr(content_agent.time, "sleep", lambda seconds: calls.append(seconds))
+
+    assert content_agent.chat("hello") == "recovered"
+    assert calls == ["hello", 2, "hello", 4, "hello"]
+
+
+def test_content_generates_image_prompt_for_carrousel(monkeypatch):
+    from agents import content_agent
+
+    monkeypatch.setattr(content_agent, "chat", lambda prompt, temperature=0.7: "Post\n---HASHTAGS---\n#Data")
+    monkeypatch.setattr(content_agent, "_generate_image_prompt", lambda content: "visual prompt")
+
+    result = content_agent.run_content({"theme": "AI", "format": "carrousel"})
+
+    assert result["image_prompt"] == "visual prompt"
+
+
 def test_gemini_complete_json_native_success(monkeypatch):
     provider, client = _make_gemini(
         monkeypatch, [_FakeGenaiResponse(text='{"theme": "AI", "special_day": "N/A"}')]

@@ -328,6 +328,16 @@ def test_failed_approval_email_never_leaves_a_post_waiting(monkeypatch):
     assert thread.status == "failed"
 
 
+def test_post_thread_failure_marks_post_failed(monkeypatch):
+    post_id = _make_post()
+    monkeypatch.setattr(runner, "_stream_and_log", lambda *args: (_ for _ in ()).throw(RuntimeError("graph down")))
+
+    start_post_thread(post_id)
+
+    post = _get_post(post_id)
+    assert post.status == "failed"
+
+
 def test_pending_normal_node_is_running_not_interrupted():
     """`StateSnapshot.next` means runnable work; only `interrupts` means
     external input is required. Keeping these distinct makes recovery safe."""

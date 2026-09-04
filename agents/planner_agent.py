@@ -20,7 +20,11 @@ from database.models import MonthlyPlan, SessionLocal
 
 
 def chat(prompt: str, temperature: float = 0.3) -> str:
-    response = get_llm(role="planning").complete(prompt, temperature=temperature)
+    response = get_llm(role="planning").complete(
+        prompt,
+        temperature=temperature,
+        max_tokens=6000,
+    )
     if not response.ok:
         raise RuntimeError(response.error)
     return response.text
@@ -39,16 +43,21 @@ def build_monthly_plan(month: str, special_days: list, trends: list) -> dict:
     post_id = 1
 
     for scheduled_date, scheduled_time in regular_slots:
+        article = trends[(post_id - 1) % len(trends)] if trends else {}
+        article_title = article.get("title") or "Actualité Data, Digital ou IA"
+        article_summary = article.get("summary") or ""
         posts.append(
             {
                 "id": post_id,
                 "scheduled_date": scheduled_date,
                 "scheduled_time": scheduled_time,
-                "theme": f"Tendance #{post_id} du mois",
+                "theme": article_title,
                 "format": "texte",
                 "special_day": None,
-                "trend_source": trends[0].get("source") if trends else None,
-                "brief": f"Créer un post régulier autour d'une tendance du mois sur le thème data, digital et IA.",
+                "trend_source": article.get("source"),
+                "trend_article_title": article_title,
+                "trend_article_url": article.get("url"),
+                "brief": f"S'appuyer sur l'article « {article_title} ». Résumé source : {article_summary}. Déduire un angle éditorial, un point clé concret et un exemple à développer à partir de cet article.",
             }
         )
         post_id += 1
@@ -57,6 +66,7 @@ def build_monthly_plan(month: str, special_days: list, trends: list) -> dict:
         day_date = day.get("date")
         if not day_date:
             continue
+        article = trends[(post_id - 1) % len(trends)] if trends else {}
         posts.append(
             {
                 "id": post_id,
@@ -65,8 +75,10 @@ def build_monthly_plan(month: str, special_days: list, trends: list) -> dict:
                 "theme": f"Post dédié : {day.get('label', 'Événement spécial')}",
                 "format": "carrousel",
                 "special_day": day.get("label"),
-                "trend_source": None,
-                "brief": f"Créer un post dédié à {day.get('label', 'cet événement spécial')} avec un angle data, digital ou IA.",
+                "trend_source": article.get("source"),
+                "trend_article_title": article.get("title"),
+                "trend_article_url": article.get("url"),
+                "brief": f"S'appuyer sur l'article « {article.get('title', '')} » et relier son résumé ({article.get('summary', '')}) à {day.get('label', 'cet événement spécial')} avec un angle data, digital ou IA.",
             }
         )
         post_id += 1
@@ -85,6 +97,7 @@ def fetch_rss_trends() -> list:
                         "title": entry.get("title", ""),
                         "summary": entry.get("summary", "")[:200],
                         "source": feed.feed.get("title", "Source"),
+                        "url": entry.get("link", ""),
                     }
                 )
         except Exception as e:
@@ -137,7 +150,12 @@ def run_planner(month: str, analytics_report: dict = None) -> dict:
     international_it_days = get_month_international_it_days(year, m)
     spec_days = tunisian_special_days + international_it_days
 
-    trends_text = "\n".join([f"- [{a['source']}] {a['title']}" for a in trends[:15]])
+    trends_text = "\n".join(
+        [
+            f"[{i}] [{a['source']}] {a['title']}\n    Résumé : {a.get('summary', '')}\n    URL : {a.get('url', '')}"
+            for i, a in enumerate(trends[:15], 1)
+        ]
+    ) or "Aucun article RSS récupéré."
     spec_days_text = (
         "\n".join([f"- {d['date']} : {d['label']}" for d in spec_days])
         or "Aucun jour spécial ce mois-ci."
@@ -203,10 +221,16 @@ INSTRUCTIONS :
 1. Crée un plan complet pour ce mois avec EXACTEMENT 6 posts réguliers plus 1 post dédié pour chaque jour spécial listé.
 2. Utilise les dates et heures fournies pour les 6 posts réguliers.
 3. Pour chaque jour spécial : crée un post dédié à la date du jour spécial, à {SPECIAL_DAY_TIME}, avec "special_day" égal au nom du jour.
-4. Chaque post doit s'inspirer d'une tendance RSS différente et ne pas répéter les sources.
-5. Les briefs doivent être précis : angle éditorial, point clé à développer, ton attendu.
-6. Formats variés : texte, carrousel, vidéo.
-7. Ton : expert, pédagogique, jamais publicitaire.
+4. Chaque post régulier doit sélectionner UN article RSS précis dans la liste numérotée ci-dessus.
+5. Pour chaque post régulier, recopie exactement le titre et l'URL de l'article sélectionné dans
+    "trend_article_title" et "trend_article_url". Le "theme" doit être dérivé du titre de cet
+    article, et le "brief" doit s'appuyer sur son résumé et expliquer l'angle à développer.
+6. N'utilise jamais de libellé générique comme "Tendance #1 du mois" et n'invente pas d'article.
+7. Les articles sélectionnés doivent être différents autant que possible. Pour un jour spécial,
+    conserve l'angle du jour mais rattache aussi le post à l'article RSS le plus pertinent.
+8. Les briefs doivent être précis : angle éditorial, point clé à développer, ton attendu.
+9. Formats variés : texte, carrousel.
+10. Ton : expert, pédagogique, jamais publicitaire.
 
 EXEMPLES DE BONS BRIEFS :
 - "Expliquer pourquoi 80% des projets data échouent à cause du manque de gouvernance, avec des pistes concrètes pour l'éviter"
@@ -225,6 +249,8 @@ Réponds UNIQUEMENT en JSON valide sans texte avant ou après :
       "format": "texte|carrousel",
       "special_day": "nom du jour ou null",
       "trend_source": "source RSS ou null",
+    "trend_article_title": "titre exact de l'article RSS sélectionné",
+    "trend_article_url": "URL exacte de l'article RSS sélectionné",
       "brief": "description précise du post : angle éditorial, point clé à développer, ton attendu"
     }}
   ]
@@ -237,6 +263,7 @@ Réponds UNIQUEMENT en JSON valide sans texte avant ou après :
         print("LLM error: failed to generate the plan.")
         print("This usually means the API model could not be reached or the request failed.")
         print("Error details:", exc)
+        plan_template["generation_source"] = "rss_fallback"
         return plan_template
 
     # extract_json + sanitize_nullish (Phase 1) instead of a bare
@@ -250,11 +277,23 @@ Réponds UNIQUEMENT en JSON valide sans texte avant ou après :
     result = extract_json(raw)
     if result is None:
         print(" No JSON found in response")
-        return build_fallback_plan(month)
+        plan_template["generation_source"] = "rss_fallback"
+        return plan_template
 
     result = sanitize_nullish(result)
 
     if isinstance(result, dict) and isinstance(result.get("posts"), list):
+        regular_result_posts = [post for post in result["posts"] if not post.get("special_day")]
+        for index, post in enumerate(regular_result_posts[:6]):
+            article = trends[index % len(trends)] if trends else {}
+            if article and not post.get("trend_article_title"):
+                post["trend_article_title"] = article.get("title")
+            if article and not post.get("trend_article_url"):
+                post["trend_article_url"] = article.get("url")
+            if article and (not post.get("theme") or str(post.get("theme")).lower().startswith("tendance #")):
+                post["theme"] = article.get("title")
+            if article and not post.get("trend_source"):
+                post["trend_source"] = article.get("source")
         regular_posts = [post for post in result["posts"] if not post.get("special_day")]
         special_posts = [post for post in result["posts"] if post.get("special_day")]
         if len(regular_posts) < 6 or len(special_posts) < len(spec_days):
@@ -271,7 +310,9 @@ Réponds UNIQUEMENT en JSON valide sans texte avant ou après :
                 )
                 merged_posts.append(matching_post or template_post)
             result["posts"] = merged_posts
+        result["generation_source"] = "llm"
         return result
+    plan_template["generation_source"] = "rss_fallback"
     return plan_template
 
 

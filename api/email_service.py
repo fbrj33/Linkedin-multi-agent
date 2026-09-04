@@ -1,5 +1,7 @@
 import smtplib
 import os
+from email.mime.base import MIMEBase
+from email import encoders
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from dotenv import load_dotenv
@@ -40,8 +42,8 @@ def render_template(template: str, variables: dict) -> str:
     return template
 
 
-def send_email(subject: str, html_body: str, to_addr: str | None = None, message_id: str | None = None) -> bool:
-    
+def send_email(subject: str, html_body: str, to_addr: str | None = None, message_id: str | None = None, in_reply_to: str | None = None, references: str | None = None, attachment_path: str | None = None) -> bool:
+    """Send email via Gmail SMTP with optional threading headers."""
     gmail_user = _gmail_user()
     gmail_password = _gmail_password()
     if not gmail_user or not gmail_password:
@@ -55,18 +57,27 @@ def send_email(subject: str, html_body: str, to_addr: str | None = None, message
         msg["Subject"] = subject
         msg["From"]    = gmail_user
         msg["To"]      = recipient
+        
         if message_id:
             msg["Message-ID"] = message_id
-        
-        
         if in_reply_to:
             msg["In-Reply-To"] = in_reply_to
         if references:
             msg["References"] = references
 
-        
-
         msg.attach(MIMEText(html_body, "html"))
+
+        if attachment_path and os.path.isfile(attachment_path):
+            with open(attachment_path, "rb") as attachment:
+                part = MIMEBase("application", "octet-stream")
+                part.set_payload(attachment.read())
+            encoders.encode_base64(part)
+            part.add_header(
+                "Content-Disposition",
+                "attachment",
+                filename=os.path.basename(attachment_path),
+            )
+            msg.attach(part)
 
         with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
             server.login(gmail_user, gmail_password)

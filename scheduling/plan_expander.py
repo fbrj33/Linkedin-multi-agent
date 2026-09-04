@@ -94,6 +94,8 @@ def expand_plan(plan_id: int) -> list[int]:
                 scheduled_time=scheduled_time,
                 special_day=item.get("special_day"),
                 trend_source=item.get("trend_source"),
+                trend_article_title=item.get("trend_article_title"),
+                trend_article_url=item.get("trend_article_url"),
                 brief=item.get("brief"),
                 retry_count=0,
                 status="planned",

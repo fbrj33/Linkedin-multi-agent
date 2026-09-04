@@ -150,9 +150,8 @@ def expand_plan(state: PlanState) -> dict:
     """
     from scheduling.plan_expander import expand_plan as expand_plan_rows
 
-    from orchestrator.runner import start_post_thread
+    from orchestrator.runner import start_post_threads
 
     post_ids = expand_plan_rows(state["plan_id"])
-    for post_id in post_ids:
-        start_post_thread(post_id)
+    start_post_threads(post_ids)
     return {"post_ids": post_ids}

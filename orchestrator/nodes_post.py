@@ -1,13 +1,6 @@
 from __future__ import annotations
 
-"""
-Post-graph node functions.
 
-Post.status is written on every transition below, but it is a projection,
-not the truth — the checkpoint is authoritative (see runner.reconcile_on_startup,
-which repairs this projection from checkpoint state on startup). It exists
-so an operator can answer "what's stuck" with one SQL query at 2am.
-"""
 
 import datetime
 import logging
@@ -18,8 +11,8 @@ from zoneinfo import ZoneInfo
 
 from langgraph.types import interrupt
 
-from agents.content_agent import run_content
-from api.email_service import EmailDelivery, load_template, render_template, send_email
+from agents.content_agent import generate_image_for_post, run_content
+from api.email_service import load_template, render_template, send_email
 from database.models import Post, SessionLocal
 from llm import get_llm
 from orchestrator.state import PostState
@@ -66,6 +59,8 @@ def _post_brief_from_state(state: PostState) -> dict:
         "scheduled_time": state.get("scheduled_time"),
         "special_day": state.get("special_day"),
         "trend_source": state.get("trend_source"),
+        "trend_article_title": state.get("trend_article_title"),
+        "trend_article_url": state.get("trend_article_url"),
         "brief": state.get("brief"),
     }
 
@@ -76,18 +71,21 @@ def _hashtags_str(hashtags) -> str | None:
     return hashtags
 
 
-def _generate_image_if_requested(post_id: int, post_format: str | None) -> None:
+def _generate_image_if_requested(
+    post_id: int,
+    post_format: str | None,
+    post_content: str | None = None,
+    image_prompt: str | None = None,
+) -> None:
     """Generate a visual as part of the existing content path.
-
-    The local import avoids a module-level dependency cycle: the supplied
-    image generator is free to import database models itself.
+    
+    Builds a descriptive prompt from the post content to guide FLUX.1-schnell.
     """
-    if (post_format or "").strip().lower() not in {"image", "photo"}:
+    if (post_format or "").strip().lower() not in {"image", "photo", "carousel", "carrousel"}:
         return
-
-    from agents.image_generator import generate_image_for_post
-
-    generate_image_for_post(post_id)
+    
+    prompt = image_prompt or (f"Professional LinkedIn post visual for: {post_content[:200]}" if post_content else None)
+    generate_image_for_post(post_id, prompt=prompt)
 
 
 def load(state: PostState) -> dict:
@@ -110,6 +108,8 @@ def load(state: PostState) -> dict:
             "scheduled_time": post.scheduled_time,
             "special_day": post.special_day,
             "trend_source": post.trend_source,
+            "trend_article_title": post.trend_article_title,
+            "trend_article_url": post.trend_article_url,
             "brief": post.brief,
             "approval_token": post.approval_token,
             "deadline": post.approval_deadline.isoformat() if post.approval_deadline else None,
@@ -143,16 +143,16 @@ def _save_content(post_id: int, content: str | None, hashtags: str | None) -> No
 
 
 def generate_content(state: PostState) -> dict:
-    result = run_content(_post_brief_from_state(state), retry_feedback=state.get("rejection_reason"))
+    result = run_content(_post_brief_from_state(state))
     content = result.get("content")
     hashtags = _hashtags_str(result.get("hashtags"))
     _save_content(state["post_id"], content, hashtags)
-    _generate_image_if_requested(state["post_id"], state.get("format"))
+    _generate_image_if_requested(state["post_id"], state.get("format"), content, result.get("image_prompt"))
     return {
         "content": content,
         "hashtags": hashtags,
-        "rejection_reason": None,
     }
+
 
 
 _SCORE_PROMPT = """Tu es un évaluateur de contenu LinkedIn B2B pour Wimbee (Data/Digital/IA).
@@ -167,10 +167,7 @@ Réponds en JSON strict, rien d'autre :
 
 
 def score_content(state: PostState) -> dict:
-    """Returns predicted_score AND the model's specific critique
-    (score_reason) — the critique used to be computed and thrown away,
-    which is exactly why refine_content couldn't act on anything more
-    specific than a generic "try harder" message (see that function)."""
+    
     llm = get_llm(role="scoring")
     parsed, response = llm.complete_json(_SCORE_PROMPT.format(content=state.get("content") or ""))
 
@@ -205,13 +202,7 @@ def score_content(state: PostState) -> dict:
 
 
 def refine_content(state: PostState) -> dict:
-    """Rewrites using the scoring model's own specific critique (score_reason)
-    plus the actual previous draft, quoted verbatim — not a generic "try
-    harder" message. Without both of those, the model has no way to know
-    *what* was wrong or *what it already tried*, which is exactly why a post
-    could score identically across every refine attempt: each attempt was
-    effectively guessing blind at the same starting point.
-    """
+    
     score = state.get("predicted_score")
     reason = state.get("score_reason")
     previous_content = state.get("content") or ""
@@ -232,17 +223,18 @@ def refine_content(state: PostState) -> dict:
             "net (angle, accroche ou exemple différent), pas une variation mineure."
         )
     feedback = "\n\n".join(feedback_parts)
-
     result = run_content(_post_brief_from_state(state), retry_feedback=feedback)
     content = result.get("content")
     hashtags = _hashtags_str(result.get("hashtags"))
     _save_content(state["post_id"], content, hashtags)
-    _generate_image_if_requested(state["post_id"], state.get("format"))
+    _generate_image_if_requested(state["post_id"], state.get("format"), content, result.get("image_prompt"))
     return {
         "content": content,
         "hashtags": hashtags,
         "refine_count": attempt,
     }
+
+
 
 
 def notify_post_approval(state: PostState) -> dict:
@@ -333,7 +325,8 @@ def post_approval(state: PostState) -> dict:
 
 
 def send_rejection_reply(state: PostState) -> dict:
-    
+    regenerated = generate_content(state)
+
     db = SessionLocal()
     try:
         post = db.query(Post).filter(Post.id == state["post_id"]).first()
@@ -341,6 +334,7 @@ def send_rejection_reply(state: PostState) -> dict:
             return {}
         
         
+        db.refresh(post)
         original_message_id = post.email_message_id
         if not original_message_id:
             log.warning(f"Post {post.id}: no original Message-ID stored; cannot thread reply")
@@ -354,8 +348,8 @@ def send_rejection_reply(state: PostState) -> dict:
             "scheduled_date": post.scheduled_date,
             "scheduled_time": post.scheduled_time or "",
             "deadline": deadline_label,
-            "content": post.content or "",
-            "hashtags": post.hashtags or "",
+            "content": regenerated.get("content") or post.content or "",
+            "hashtags": regenerated.get("hashtags") or post.hashtags or "",
             "approval_token": post.approval_token,
             "rejection_reason": state.get("rejection_reason", ""),
         })
@@ -375,7 +369,8 @@ def send_rejection_reply(state: PostState) -> dict:
         html_body=html,
         to_addr=admin_email,
         in_reply_to=original_message_id,
-        references=original_message_id
+        references=original_message_id,
+        attachment_path=post.image_path,
     )
     
     if not sent:
@@ -399,7 +394,7 @@ def send_rejection_reply(state: PostState) -> dict:
         db.close()
     
     log.info(f"✓ Regenerated post {state['post_id']} sent as reply in thread")
-    return {}
+    return regenerated
 
 
 def wait_for_slot(state: PostState) -> dict:

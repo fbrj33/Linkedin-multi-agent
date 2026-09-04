@@ -3,7 +3,6 @@ langgraph-checkpoint-sqlite
 langchain-core
 sqlalchemy
 openai
-google-genai
 python-dotenv
 requests
 playwright

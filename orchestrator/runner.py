@@ -9,6 +9,7 @@ all lives inside the graph nodes themselves.
 """
 
 import logging
+import time
 
 from langgraph.types import Command
 
@@ -39,9 +40,24 @@ _NODE_TO_PROJECTED_STATUS = {
     "verify_publish": "approved",
 }
 
+POST_THREAD_DELAY_SECONDS = 4
+
 
 def _config(thread_id: str) -> dict:
     return {"configurable": {"thread_id": thread_id}}
+
+
+def _mark_post_failed(post_id: int | None) -> None:
+    if post_id is None:
+        return
+    db = SessionLocal()
+    try:
+        post = db.query(Post).filter(Post.id == post_id).first()
+        if post is not None:
+            post.status = "failed"
+            db.commit()
+    finally:
+        db.close()
 
 
 def _record_graph_state(thread_id: str, thread_type: str, graph, *, post_id=None, month=None) -> None:
@@ -126,15 +142,24 @@ def start_post_thread(post_id: int) -> None:
         )
         return
 
-    graph = get_post_graph()
     thread_registry.upsert_thread(thread_id, "post", "running", post_id=post_id)
     log.info("[%s] starting...", thread_id)
     try:
+        graph = get_post_graph()
         _stream_and_log(graph, thread_id, PostState(post_id=post_id))
         _record_graph_state(thread_id, "post", graph, post_id=post_id)
     except Exception:
         log.exception("[%s] post thread failed", thread_id)
+        _mark_post_failed(post_id)
         thread_registry.upsert_thread(thread_id, "post", "failed", current_node="error", post_id=post_id)
+
+
+def start_post_threads(post_ids: list[int]) -> None:
+    for index, post_id in enumerate(post_ids):
+        if index:
+            log.info("Waiting %ss before starting post %s", POST_THREAD_DELAY_SECONDS, post_id)
+            time.sleep(POST_THREAD_DELAY_SECONDS)
+        start_post_thread(post_id)
 
 
 def resume_thread(thread_id: str, resume_value) -> bool:
@@ -171,6 +196,7 @@ def resume_thread(thread_id: str, resume_value) -> bool:
         return True
     except Exception:
         log.exception("[%s] resume failed", thread_id)
+        _mark_post_failed(thread.get("post_id"))
         thread_registry.upsert_thread(
             thread_id, thread_type, "failed", current_node="error",
             post_id=thread.get("post_id"), month=thread.get("month"),
@@ -200,6 +226,7 @@ def recover_running_threads() -> int:
             recovered += 1
         except Exception:
             log.exception("[%s] recovery failed", thread_id)
+            _mark_post_failed(thread.get("post_id"))
             thread_registry.upsert_thread(
                 thread_id, thread["thread_type"], "failed", current_node="error",
                 post_id=thread.get("post_id"), month=thread.get("month"),

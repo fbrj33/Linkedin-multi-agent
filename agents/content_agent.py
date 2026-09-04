@@ -2,16 +2,22 @@ from llm import get_llm
 from database.models import SessionLocal, Post
 import datetime
 import json
-import re
+import os
+import logging
+
+log = logging.getLogger(__name__)
 
 
-
+def _gemini_retry_delay(error: str, default: float = 30.0) -> float:
+    match = re.search(r"retryDelay\s*[\"']?\s*[:=]\s*[\"']?(\d+(?:\.\d+)?)s", error, re.IGNORECASE)
+    return float(match.group(1)) if match else default
 
 def chat(prompt: str, temperature: float = 0.7) -> str:
-    response = get_llm(role="content").complete(prompt, temperature=temperature)
-    if not response.ok:
-        raise RuntimeError(response.error)
-    return response.text
+    llm = get_llm(role="content")
+    response = llm.complete(prompt, temperature=temperature)
+    if response.ok:
+        return response.text
+    raise RuntimeError(response.error)
 
 WIMBEE_CONTEXT = """
 Tu es un expert en Data, Digital et Intelligence Artificielle qui rédige du contenu LinkedIn
@@ -41,10 +47,103 @@ PHILOSOPHIE ÉDITORIALE OBLIGATOIRE :
 - Le lecteur doit finir en pensant "cet expert sait de quoi il parle"
 """
 
+_IMAGE_PROMPT_TEMPLATE = """Tu es un expert en création de visuels LinkedIn professionnel.
+Crée un prompt descriptif et concis pour générer une image professionnelle basée sur ce post :
+
+POST :
+{post_content}
+
+Réponds UNIQUEMENT avec un prompt d'image court (1-2 phrases), sans JSON ni explications.
+Le prompt doit être en anglais pour FLUX.1-schnell.
+Exemple de réponse : "Professional infographic about data analytics trends, modern blue and white design, clean typography, minimal text"
+"""
+
+def _generate_image_prompt(post_content: str) -> str:
+    """Use LLM to generate a visual prompt from post content."""
+    try:
+        response = get_llm(role="content").complete(
+            _IMAGE_PROMPT_TEMPLATE.format(post_content=post_content),
+            temperature=0.6
+        )
+        if response.ok:
+            return response.text.strip()
+        else:
+            log.warning(f"Failed to generate image prompt: {response.error}")
+            return None
+    except Exception as e:
+        log.error(f"Error generating image prompt: {e}")
+        return None
+
+
+def _call_flux_image_generation(prompt: str, post_id: int) -> str | None:
+    """Call FLUX.1-schnell via Hugging Face Inference API to generate image."""
+    hf_api_key = os.getenv("HUGGINGFACE_API_KEY", "").strip()
+    
+    if not hf_api_key:
+        log.warning(f"HUGGINGFACE_API_KEY not set; skipping image generation for post {post_id}")
+        return None
+
+    try:
+        import requests
+        import time
+
+        api_url = "https://api-inference.huggingface.co/models/black-forest-labs/FLUX.1-schnell"
+        headers = {"Authorization": f"Bearer {hf_api_key}"}
+        payload = {"inputs": prompt}
+        log.info(f"Generating image for post {post_id} with prompt: {prompt[:80]}...")
+
+        response = requests.post(api_url, headers=headers, json=payload, timeout=120)
+        if response.status_code != 200:
+            log.error(f"Image generation failed for post {post_id}: {response.status_code} — {response.text}")
+            return None
+
+        image_dir = os.path.join(os.getcwd(), "generated_images")
+        os.makedirs(image_dir, exist_ok=True)
+        image_path = os.path.join(image_dir, f"post_{post_id}_{int(time.time())}.png")
+        with open(image_path, "wb") as f:
+            f.write(response.content)
+
+        log.info(f"Image generated for post {post_id}: {image_path}")
+        return image_path
+    except Exception as e:
+        log.error(f"Image generation error for post {post_id}: {e}")
+        return None
+
+
+def generate_image_for_post(post_id: int, prompt: str | None = None) -> str | None:
+    """Generate and persist an image for an existing post.
+
+    The post graph creates the row before content generation, so it can reuse
+    the same image implementation without introducing a second agent module.
+    """
+    db = SessionLocal()
+    try:
+        post = db.query(Post).filter(Post.id == post_id).first()
+        if post is None:
+            log.warning("Post %s not found; cannot generate image", post_id)
+            return None
+        image_prompt = prompt or post.content or "Professional LinkedIn visual about data, digital transformation, and AI"
+    finally:
+        db.close()
+
+    image_path = _call_flux_image_generation(image_prompt, post_id)
+    if image_path is None:
+        return None
+
+    db = SessionLocal()
+    try:
+        post = db.query(Post).filter(Post.id == post_id).first()
+        if post is not None:
+            post.image_path = image_path
+            db.commit()
+    finally:
+        db.close()
+    return image_path
+
 
 def run_content(post_brief: dict, retry_feedback: str = None):
+    """Generate post content and optionally an image if format requires it."""
     
-
     feedback_block = ""
     if retry_feedback:
         feedback_block = f"""
@@ -139,15 +238,35 @@ Règles hashtags :
         content  = raw.strip()
         hashtags = ["#Wimbee", "#DataDigital", "#Tunisie", "#Data", "#IA"]
 
+    # Generate visuals for all visual format spellings produced by the planner.
+    image_path = None
+    image_prompt = None
+    post_format = (post_brief.get("format") or "").strip().lower()
+    if post_format in {"image", "photo", "carousel", "carrousel"}:
+        log.info(f"Post format is '{post_format}' — generating image...")
+        
+        # Generate image prompt using LLM
+        image_prompt = _generate_image_prompt(content)
+        
+        if image_prompt:
+            log.info(f"Generated image prompt: {image_prompt[:100]}...")
+            # Call FLUX.1-schnell (but post_id is not available yet at this stage)
+            # So we'll return the prompt and let the caller handle the actual image generation
+            # OR generate it here if post already exists
+        else:
+            log.warning("Failed to generate image prompt; skipping image generation")
+
     return {
         "content":  content,
         "hashtags": hashtags,
+        "image_prompt": image_prompt if post_format in {"image", "photo", "carousel", "carrousel"} else None,
     }
 
 
-def save_post(post_brief: dict, content: str, hashtags: list) -> Post:
+def save_post(post_brief: dict, content: str, hashtags: list, image_prompt: str = None) -> Post:
     """
     Saves the generated post and hashtags to the database with status 'draft'.
+    If image_prompt is provided and format is image/carousel, generates the image.
     """
     db = SessionLocal()
 
@@ -274,6 +393,21 @@ def save_post(post_brief: dict, content: str, hashtags: list) -> Post:
     finally:
         db.close()
 
+    # NEW: Generate image if format requires it and prompt is available
+    post_format = (post_brief.get("format") or "").strip().lower()
+    if post_format in ["image", "photo", "carousel"] and image_prompt:
+        image_path = _call_flux_image_generation(image_prompt, db_post.id)
+        
+        if image_path:
+            db = SessionLocal()
+            try:
+                post = db.query(Post).filter(Post.id == db_post.id).first()
+                if post:
+                    post.image_path = image_path
+                    db.commit()
+                    log.info(f"Image path saved to post {db_post.id}")
+            finally:
+                db.close()
 
     print(
         f" Post saved (id={db_post.id}) | {db_post.theme[:50]}"
