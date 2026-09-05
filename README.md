@@ -9,19 +9,21 @@ An intelligent multi-agent system that automates the LinkedIn content pipeline f
 The system runs on a monthly cycle. On the 1st of each month, it generates a full editorial plan based on real RSS trends and the Tunisian calendar, sends it to the admin for approval, then autonomously generates, revises, and schedules each post — always waiting for explicit human sign-off before publishing anything.
 
 ```
-1st of month
+When started for a month
     ↓
-Planner Agent → fetches RSS trends + Tunisian calendar → builds 12-post plan
+Planner Agent → fetches RSS trends + Tunisian calendar → builds 6 regular posts plus special-day posts
     ↓
-Admin receives plan by email → replies OUI or NON
-    ↓ (OUI or auto-approved after 72h)
+Admin receives plan by email → replies with an approval decision
+    ↓ (approved or auto-approved after the deadline)
 Content Agent → writes each post (special day posts always generated)
     ↓
 Hashtags generated inline by Content Agent
     ↓
-Admin receives each post by email → replies OUI or NON
-    ↓ (OUI = scheduled, NON or ignored = cancelled)
-Publisher → publishes at scheduled time via LinkedIn API
+Optional carousel generation → creates 3 slide images by default through Hugging Face FLUX
+    ↓
+Admin receives each post by email → approves or rejects
+    ↓ (approved = scheduled, rejected = regenerated within the retry limit)
+Publisher → publishes at scheduled time through the configured publisher backend
     ↓ (48h later)
 Analytics Agent → collects metrics → feeds next month's plan
 ```
@@ -34,8 +36,8 @@ Analytics Agent → collects metrics → feeds next month's plan
 |---|---|
 | **Planner** | Fetches RSS trends, checks Tunisian calendar, builds the monthly editorial plan with smart posting dates |
 | **Content** | Writes full LinkedIn posts in French, generates hashtags, handles retries with revision feedback |
-| **Revision** | Scores content on 4 criteria (clarity, engagement, conformity, tone), triggers retry if score < 7 |
-| **Publisher** | Publishes approved posts via LinkedIn API at the scheduled time |
+| **Revision** | Scores content and triggers refinement when the score is below the configured threshold |
+| **Publisher** | Publishes approved posts through the configured manual, relay, official API, or browser backend |
 | **Analytics** | Collects post metrics 48h after publication, generates monthly report, feeds next cycle |
 
 ---
@@ -46,7 +48,8 @@ Analytics Agent → collects metrics → feeds next month's plan
 |---|---|
 | Language | Python 3.13 |
 | Agent orchestration | LangGraph (LangChain) |
-| LLM | OpenRouter API (llama-4-scout, deepseek, mistral — free tier with auto-fallback) |
+| LLM | Groq-compatible API through the centralized provider factory; current model is `qwen/qwen3.8-27b` |
+| Image generation | `huggingface_hub.InferenceClient` with `black-forest-labs/FLUX.1-schnell` through the `fal-ai` provider |
 | RSS trends | `feedparser` — Google News RSS + HBR + Les Echos + JDN + L'Usine Digitale |
 | Tunisian calendar | Static config + `hijri-converter` for Islamic holidays |
 | Email sending | Gmail SMTP via `smtplib` |
@@ -63,42 +66,48 @@ Analytics Agent → collects metrics → feeds next month's plan
 wimbee-linkedin-agent/
 ├── agents/
 │   ├── planner_agent.py       # Trend fetching + editorial plan generation
-│   ├── content_agent.py       # Post writing + hashtag generation
-│   ├── revision_agent.py      # Content scoring + retry logic
+│   ├── content_agent.py       # Post writing, image prompts, and carousel images
 │   ├── analytique_agent.py    # Metrics collection + monthly report
-│   └── __init__.py
+│   └── linkedin_poster.py     # Legacy browser posting helper
 │
 ├── orchestrator/
-│   ├── graph.py               # LangGraph pipeline — parallel post generation
-│   ├── run_monthly_plan.py    # Monthly plan generation + DB save + email
-│   └── __init__.py
+│   ├── plan_graph.py          # LangGraph monthly planning workflow
+│   ├── post_graph.py          # LangGraph per-post workflow
+│   ├── nodes_plan.py          # Plan graph node implementations
+│   ├── nodes_post.py          # Post graph node implementations
+│   ├── runner.py              # Starts and resumes graph threads
+│   ├── checkpointer.py        # SQLite LangGraph checkpoint persistence
+│   ├── inbox.py               # Reads approval replies and resumes threads
+│   └── state.py               # Typed plan/post graph state
 │
 ├── api/
 │   ├── email_service.py       # Gmail SMTP — plan + post approval emails
-│   ├── inbox_checker.py       # Gmail IMAP — reads OUI/NON replies
+│   ├── email_service.py       # Gmail SMTP — approval emails and attachments
 │   └── templates/
 │       ├── plan_email.html    # Monthly plan email template
 │       └── post_email.html    # Post approval email template
 │
 ├── config/
-│   ├── LLM.py                 # OpenRouter client + model fallback logic
+│   ├── content_config.py      # Posting configuration
 │   ├── tunisian_calendar.py   # National days + business events + Islamic holidays
 │   ├── rss_sources.py         # RSS feed URLs + posting schedule constants
 │   └── __init__.py
 │
-├── db/
-│   ├── models.py              # SQLAlchemy models: Post, MonthlyPlan, Analytics...
+├── database/
+│   ├── models.py              # SQLAlchemy models and database initialization
 │   └── __init__.py
 │
-├── scheduler/
-│   └── jobs.py                # APScheduler jobs — monthly plan, inbox check, publish
+├── scheduling/
+│   ├── scheduler.py           # Scheduler and graph-resumption jobs
+│   └── plan_expander.py       # Converts approved plans into Post rows
 │
 ├── tests/
-│   ├── test_planner.py        # Planner agent tests
-│   ├── test_content.py        # Content agent tests
-│   └── test_e2e.py            # End-to-end pipeline tests
+│   ├── test_plan_graph.py     # Plan graph tests
+│   ├── test_post_graph.py     # Post graph tests
+│   ├── test_carousel_generation.py # No-publish carousel generation test
+│   └── test_end_to_end.py     # End-to-end pipeline tests
 │
-├── main.py                    # Entry point — initializes DB and starts scheduler
+├── main.py                    # CLI entry point for plan, reply, and run commands
 ├── .env                       # Environment variables (not committed)
 ├── .env.example               # Template for environment variables
 ├── requirements.txt           # Python dependencies
@@ -132,8 +141,16 @@ pip install -r requirements.txt
 Copy `.env.example` to `.env` and fill in your credentials :
 
 ```env
-# OpenRouter API (free tier)
-OPENROUTER_API_KEY=sk-or-v1-xxxxxx
+# Groq LLM backend
+LLM_PROVIDER=groq
+GROQ_API_KEY=your_groq_key
+LLM_MODEL=qwen/qwen3.8-27b
+
+# Hugging Face carousel image generation
+HF_TOKEN=your_huggingface_token
+HF_IMAGE_MODEL=black-forest-labs/FLUX.1-schnell
+HF_IMAGE_PROVIDER=fal-ai
+WIMBEE_CAROUSEL_SLIDE_COUNT=3
 
 # Gmail — system account that sends emails
 GMAIL_USER=wimbee.automation@gmail.com
@@ -150,15 +167,15 @@ ADMIN_EMAIL=your-personal-email@gmail.com
 4. Create a new app password named "Wimbee"
 5. Copy the 16-character password into `.env`
 
-**How to get an OpenRouter API key :**
-1. Go to openrouter.ai and sign up
-2. Go to API Keys → Create key
-3. Copy the key into `.env`
+**How to configure the LLM and image providers :**
+1. Create a Groq API key and put it in `GROQ_API_KEY`.
+2. Create a Hugging Face token with inference access and put it in `HF_TOKEN`.
+3. Keep `.env` local; it is excluded by `.gitignore`.
 
 ### 4. Initialize the database
 
 ```bash
-python -c "from db.models import init_db; init_db(); print('DB ready')"
+python -c "from database.models import init_db; init_db(); print('DB ready')"
 ```
 
 This creates `wimbee.db` in the project root with all required tables.
@@ -166,14 +183,10 @@ This creates `wimbee.db` in the project root with all required tables.
 ### 5. Run the system
 
 ```bash
-python main.py
+python main.py plan 2026-10
 ```
 
-The scheduler starts and runs continuously. It will :
-- Generate and send the monthly plan on the 1st of each month at 08:00
-- Check your inbox every hour for OUI/NON replies
-- Publish approved posts at their scheduled times
-- Collect analytics 48h after each publication
+The CLI starts a monthly plan graph. Use `python main.py run YYYY-MM` to start a plan and then keep the scheduler running in the same process. Use `python main.py check-replies` for a one-off inbox check. The scheduler resumes interrupted LangGraph threads, handles approval decisions and scheduled slots, and runs publishing/analytics jobs.
 
 Press `Ctrl+C` to stop.
 
@@ -184,17 +197,17 @@ Press `Ctrl+C` to stop.
 ### Monthly plan approval
 
 1. On the 1st of the month, you receive an email with the full editorial plan
-2. **Reply OUI** → system starts generating all posts
-3. **Reply NON** → trend posts cancelled, special day posts still generated
-4. **No reply within 72h** → plan auto-approved, all posts generated
+2. **Approve** → system starts generating the posts
+3. **Reject** → the plan follows the rejection path defined by the plan graph
+4. **No reply before the deadline** → the configured expiry/auto-approval behavior is applied
 
 ### Post-level approval
 
 For each generated post you receive an email with the full content and hashtags :
 
-1. **Reply OUI** → post queued for publication at its scheduled time
-2. **Reply NON** → post cancelled
-3. **No reply before 72h deadline** → post automatically cancelled
+1. **Approve** → post waits for its scheduled publication slot
+2. **Reject** → the post is regenerated with the rejection feedback, up to the retry limit
+3. **No reply before the deadline** → the post expires
 
 > All approval emails have `[WIMBEE]` in the subject line. The inbox checker filters strictly on this tag — your personal emails are never read or processed.
 
@@ -241,32 +254,36 @@ Posts are written following a strict editorial philosophy :
 
 ---
 
-## LLM fallback chain
+## LLM provider
 
-The system automatically retries with the next available model if one is rate-limited :
+The agents use the centralized `llm.factory` provider selection. The current
+configuration is Groq with `qwen/qwen3.8-27b`; agents request an LLM by role
+and do not call provider-specific code directly. Provider credentials are read
+from `.env` and are never stored in source code.
 
-```
-1. meta-llama/llama-4-scout:free
-2. meta-llama/llama-4-maverick:free
-3. deepseek/deepseek-chat-v3-0324:free
-4. mistralai/mistral-small-3.1-24b-instruct:free
-```
+## Carousel images
 
-All models are free tier via OpenRouter. No credits required to get started.
+Posts whose format is `carousel` or `carrousel` generate three slides by
+default. Each slide has slide content, an image prompt, and a saved PNG path.
+Images are generated with `huggingface_hub.InferenceClient` using
+`black-forest-labs/FLUX.1-schnell` through the configured `fal-ai` provider.
+Set `WIMBEE_CAROUSEL_SLIDE_COUNT=1` when a single image is sufficient.
+
+All slides are stored as JSON metadata on the post, while `image_path` retains
+the first image for compatibility with existing publishing and email paths.
+Carousel generation uses Hugging Face inference credits; a depleted account
+will prevent the complete carousel from being marked ready.
 
 ---
 
 ## Running tests
 
 ```bash
-# Fast test — no LLM calls, no emails sent (tests pipeline logic only)
-python tests\test_e2e.py
+# Run the focused carousel generation test without publishing to LinkedIn
+python -m pytest tests/test_carousel_generation.py -q
 
-# Planner agent only
-python tests\test_planner.py
-
-# Content agent only
-python tests\test_content.py
+# Run the complete test suite
+python -m pytest -q
 ```
 
 ---
@@ -277,6 +294,7 @@ python tests\test_content.py
 |---|---|
 | `monthly_plans` | Stores each generated plan with approval status and deadline |
 | `posts` | Stores each generated post with content, hashtags, score, status |
+| `posts.carousel_json` | Stores carousel slide content, prompts, and image paths as JSON |
 | `approval_requests` | Tracks each approval email sent and the admin's decision |
 | `analytics` | Stores LinkedIn metrics collected 48h after publication |
 | `monthly_reports` | Stores the end-of-month performance report |
@@ -298,21 +316,10 @@ The planner fetches trends from these sources :
 
 ## Requirements
 
-```
-langgraph
-langchain
-langchain-community
-langchain-ollama
-openai
-feedparser
-apscheduler
-sqlalchemy
-alembic
-flask
-python-dotenv
-loguru
-hijri-converter
-```
+Dependencies are maintained in `requirements.txt`, including LangGraph,
+SQLAlchemy, the OpenAI-compatible client used by the Groq provider,
+`huggingface_hub`, Pillow, `python-dotenv`, requests, Playwright, APScheduler,
+feedparser, and pytest.
 
 ---
 
