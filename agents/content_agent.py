@@ -4,8 +4,13 @@ import datetime
 import json
 import os
 import logging
+import time
+
+from dotenv import load_dotenv
 
 log = logging.getLogger(__name__)
+
+load_dotenv()
 
 
 def _gemini_retry_delay(error: str, default: float = 30.0) -> float:
@@ -75,39 +80,93 @@ def _generate_image_prompt(post_content: str) -> str:
         return None
 
 
-def _call_flux_image_generation(prompt: str, post_id: int) -> str | None:
-    """Call FLUX.1-schnell via Hugging Face Inference API to generate image."""
-    hf_api_key = os.getenv("HUGGINGFACE_API_KEY", "").strip()
-    
-    if not hf_api_key:
-        log.warning(f"HUGGINGFACE_API_KEY not set; skipping image generation for post {post_id}")
+def _call_flux_image_generation(prompt: str, post_id: int, slide_index: int | None = None) -> str | None:
+    """Generate one image through the supported Hugging Face client."""
+    hf_token = os.getenv("HF_TOKEN", "").strip()
+    if not hf_token:
+        log.warning("HF_TOKEN not set; skipping image generation for post %s", post_id)
         return None
 
+    from huggingface_hub import InferenceClient
+
+    model = os.getenv("HF_IMAGE_MODEL", "black-forest-labs/FLUX.1-schnell").strip()
+    provider = os.getenv("HF_IMAGE_PROVIDER", "fal-ai").strip()
+    label = f"post {post_id}" if slide_index is None else f"post {post_id}, slide {slide_index}"
+    image_dir = os.path.join(os.getcwd(), "generated_images")
+    os.makedirs(image_dir, exist_ok=True)
+    filename = f"post_{post_id}.png" if slide_index is None else f"post_{post_id}_slide_{slide_index}.png"
+    image_path = os.path.join(image_dir, filename)
+
+    for attempt in range(1, 4):
+        try:
+            log.info("Generating image for %s with model %s", label, model)
+            client = InferenceClient(model=model, provider=provider, token=hf_token, timeout=120)
+            image = client.text_to_image(prompt, num_inference_steps=4)
+            image.save(image_path, format="PNG")
+            log.info("Image generated for %s: %s", label, image_path)
+            return image_path
+        except Exception as exc:
+            if attempt == 3:
+                log.error("Image generation failed for %s after %d attempts: %s", label, attempt, exc)
+                return None
+            delay = 2 ** (attempt - 1)
+            log.warning("Image generation attempt %d failed for %s; retrying in %ds", attempt, label, delay)
+            time.sleep(delay)
+
+
+def _carousel_slides(content: str, slide_count: int = 3) -> list[dict]:
+    """Create stable slide content and one visual prompt per carousel slide."""
+    paragraphs = [part.strip() for part in content.splitlines() if part.strip()]
+    fallback = content.strip() or "Data, digital transformation, and AI"
+    roles = ["Hook", "Key context", "Practical insight", "Recommended action", "Conclusion"]
+    slides = []
+    for index in range(slide_count):
+        body = paragraphs[index] if index < len(paragraphs) else fallback
+        slide_content = f"{roles[index % len(roles)]}: {body[:500]}"
+        slides.append({
+            "index": index + 1,
+            "content": slide_content,
+            "image_prompt": (
+                f"Professional LinkedIn carousel slide {index + 1}, {roles[index % len(roles)]}, "
+                f"about {body[:300]}, clean editorial infographic, readable layout, minimal text"
+            ),
+        })
+    return slides
+
+
+def generate_carousel_for_post(post_id: int, content: str | None = None) -> list[dict]:
+    """Generate, save, and persist every image belonging to a carousel post."""
+    db = SessionLocal()
     try:
-        import requests
-        import time
+        post = db.query(Post).filter(Post.id == post_id).first()
+        if post is None:
+            log.warning("Post %s not found; cannot generate carousel", post_id)
+            return []
+        source = content or post.content or "Professional LinkedIn carousel about data, digital transformation, and AI"
+        count = max(1, int(os.getenv("WIMBEE_CAROUSEL_SLIDE_COUNT", "3")))
+    finally:
+        db.close()
 
-        api_url = "https://api-inference.huggingface.co/models/black-forest-labs/FLUX.1-schnell"
-        headers = {"Authorization": f"Bearer {hf_api_key}"}
-        payload = {"inputs": prompt}
-        log.info(f"Generating image for post {post_id} with prompt: {prompt[:80]}...")
+    slides = _carousel_slides(source, count)
+    for slide in slides:
+        slide["image_path"] = _call_flux_image_generation(
+            slide["image_prompt"], post_id, slide_index=slide["index"]
+        )
 
-        response = requests.post(api_url, headers=headers, json=payload, timeout=120)
-        if response.status_code != 200:
-            log.error(f"Image generation failed for post {post_id}: {response.status_code} — {response.text}")
-            return None
+    if any(not slide["image_path"] for slide in slides):
+        log.error("Carousel generation incomplete for post %s", post_id)
+        return []
 
-        image_dir = os.path.join(os.getcwd(), "generated_images")
-        os.makedirs(image_dir, exist_ok=True)
-        image_path = os.path.join(image_dir, f"post_{post_id}_{int(time.time())}.png")
-        with open(image_path, "wb") as f:
-            f.write(response.content)
-
-        log.info(f"Image generated for post {post_id}: {image_path}")
-        return image_path
-    except Exception as e:
-        log.error(f"Image generation error for post {post_id}: {e}")
-        return None
+    db = SessionLocal()
+    try:
+        post = db.query(Post).filter(Post.id == post_id).first()
+        if post is not None:
+            post.carousel_json = json.dumps(slides, ensure_ascii=False)
+            post.image_path = slides[0]["image_path"]
+            db.commit()
+    finally:
+        db.close()
+    return slides
 
 
 def generate_image_for_post(post_id: int, prompt: str | None = None) -> str | None:
@@ -260,6 +319,7 @@ Règles hashtags :
         "content":  content,
         "hashtags": hashtags,
         "image_prompt": image_prompt if post_format in {"image", "photo", "carousel", "carrousel"} else None,
+        "carousel_slides": None,
     }
 
 
@@ -395,7 +455,7 @@ def save_post(post_brief: dict, content: str, hashtags: list, image_prompt: str 
 
     # NEW: Generate image if format requires it and prompt is available
     post_format = (post_brief.get("format") or "").strip().lower()
-    if post_format in ["image", "photo", "carousel"] and image_prompt:
+    if post_format in ["image", "photo"] and image_prompt:
         image_path = _call_flux_image_generation(image_prompt, db_post.id)
         
         if image_path:
@@ -408,6 +468,9 @@ def save_post(post_brief: dict, content: str, hashtags: list, image_prompt: str 
                     log.info(f"Image path saved to post {db_post.id}")
             finally:
                 db.close()
+    elif post_format in ["carousel", "carrousel"]:
+        if not generate_carousel_for_post(db_post.id, content=content):
+            raise RuntimeError(f"Carousel image generation failed for post {db_post.id}")
 
     print(
         f" Post saved (id={db_post.id}) | {db_post.theme[:50]}"

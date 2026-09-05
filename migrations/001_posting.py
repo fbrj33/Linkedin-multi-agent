@@ -48,6 +48,7 @@ _NEW_COLUMNS: dict[str, dict[str, str]] = {
         "email_message_id": "VARCHAR(255)",
         "trend_article_title": "VARCHAR(500)",
         "trend_article_url": "VARCHAR(1000)",
+        "carousel_json": "TEXT",
     },
     "approval_requests": {
         "reminder_sent_at": "DATETIME",

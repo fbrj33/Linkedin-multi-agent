@@ -11,7 +11,7 @@ from zoneinfo import ZoneInfo
 
 from langgraph.types import interrupt
 
-from agents.content_agent import generate_image_for_post, run_content
+from agents.content_agent import generate_carousel_for_post, generate_image_for_post, run_content
 from api.email_service import load_template, render_template, send_email
 from database.models import Post, SessionLocal
 from llm import get_llm
@@ -84,8 +84,15 @@ def _generate_image_if_requested(
     if (post_format or "").strip().lower() not in {"image", "photo", "carousel", "carrousel"}:
         return
     
+    format_name = (post_format or "").strip().lower()
+    if format_name in {"carousel", "carrousel"}:
+        slides = generate_carousel_for_post(post_id, content=post_content)
+        if not slides:
+            raise RuntimeError(f"Carousel image generation failed for post {post_id}")
+        return
     prompt = image_prompt or (f"Professional LinkedIn post visual for: {post_content[:200]}" if post_content else None)
-    generate_image_for_post(post_id, prompt=prompt)
+    if generate_image_for_post(post_id, prompt=prompt) is None:
+        raise RuntimeError(f"Image generation failed for post {post_id}")
 
 
 def load(state: PostState) -> dict:

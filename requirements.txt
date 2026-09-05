@@ -3,6 +3,8 @@ langgraph-checkpoint-sqlite
 langchain-core
 sqlalchemy
 openai
+huggingface_hub>=0.30
+Pillow>=10.0
 python-dotenv
 requests
 playwright

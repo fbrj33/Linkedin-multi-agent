@@ -33,6 +33,7 @@ Why this exists, and why it's built this way:
 """
 
 import datetime
+import json
 import logging
 import os
 import random
@@ -169,6 +170,21 @@ def _type_human_like(page: Page, editor, text: str) -> None:
             page.keyboard.press("Shift+Enter")
 
 
+def _carousel_paths(post: Post) -> list[str]:
+    """Return existing carousel files in slide order, or the legacy image."""
+    if getattr(post, "carousel_json", None):
+        try:
+            slides = json.loads(post.carousel_json)
+            paths = [slide.get("image_path") for slide in slides if slide.get("image_path")]
+            existing = [path for path in paths if os.path.isfile(path)]
+            if existing:
+                return existing
+        except (TypeError, ValueError, json.JSONDecodeError):
+            log.warning("Could not parse carousel metadata for post %s", post.id)
+    image_path = getattr(post, "image_path", None)
+    return [image_path] if image_path and os.path.isfile(image_path) else []
+
+
 def _count_published_today(db) -> int:
     start_of_day = datetime.datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
     return (
@@ -260,6 +276,12 @@ class BrowserPublisher(Publisher):
             return PublishResult(ok=False, error="Could not find the post editor")
 
         _type_human_like(page, editor, text)
+
+        image_paths = _carousel_paths(post)
+        if image_paths:
+            file_input = page.locator("input[type='file']").first
+            file_input.set_input_files(image_paths)
+            page.wait_for_timeout(3000)
 
         if _dry_run():
             screenshot_path = _screenshot(page, "dry_run")
